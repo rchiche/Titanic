@@ -1,0 +1,263 @@
+library(data.table)
+library(party)
+library(ROCR)
+library(boot)
+library(e1071)
+library(gbm)
+library(xgboost)
+
+
+data = read.csv2("C://Users/r-chiche/Desktop/Titanic/train.csv", stringsAsFactors = T, dec=".", na.strings=c(""))
+
+data = as.data.table(data)
+
+########### Data visualization ########### 
+
+head(data)
+plot(data[, sum(Survived)/length(Survived), by=Pclass])
+plot(data[, sum(Survived)/length(Survived), by=Age]) #bof
+barplot(data[, sum(Survived)/length(Survived), by=Sex]$V1,
+        names.arg=data[, sum(Survived)/length(Survived), by=Sex]$Sex)
+data[, table(SibSp, Survived)]
+data[, table(Parch, Survived)]
+data[, plot(Fare, Survived)] #bof
+data[, table(Embarked, Survived)]
+
+########### Missing data ########### 
+
+sapply(data, function(x) length(unique(x)))
+sapply(data, function(x) sum(is.na(x)))
+
+# 687 Cabins are empty -> this field will be omitted in the study
+data[, Cabin:=NULL]
+
+# Ticket ID and Passenger ID look random
+# Instead of the ticket ID, we only keep the nb of people sharing the ticket
+data[, ShareTicket:=length(Name), by=Ticket]
+data[, Ticket:=NULL]
+data[, PassengerId:=NULL]
+
+
+data[, Title:=as.factor(ifelse(Title %in% c("Capt", "Col", "Major", "Rev", "Dr"), "Gvt",
+                               ifelse(Title %in% c("Don", "Master", "Sir", "the Countess", "Lady", "Jonkheer"), "Noble",
+                                      "None")))]
+
+# # Class should be a factor and not a numeric field
+data[, Pclass:=as.factor(Pclass)]
+
+
+# Try to fill in missing Ages
+
+# Shitty GLM model
+age_model <- glm(Age~Parch+Fare, data=data[!is.na(data$Age), !c("Survived", "Name"), with=FALSE], family=gaussian)
+newage <- predict(age_model, data[, !c("Survived", "Name"), with=FALSE], type="response")
+
+plot(data$Age[!is.na(data$Age)], newage[!is.na(data$Age)])
+abline(0,1, col="red")
+
+# Regression tree
+age_model <- mob(Age~SibSp+Fare+Parch|Pclass+Sex+Embarked, data=data)
+newage <- predict(age_model, data[, !c("Survived", "Name"), with=F], type="response")
+
+plot(data$Age[!is.na(data$Age)], newage[!is.na(data$Age)])
+abline(0,1, col="red")
+
+data[is.na(Age), Age:=newage[is.na(data$Age)]]
+
+
+# Cluster Age to find children
+data[, AgeClass:=as.factor(ifelse(Age<10, "Child",
+                                  ifelse(Age<37, "Adult", "Elderly")))] 
+
+
+# Try to fill in missing Embarked with most common value (S)
+table(data$Embarked)
+data[is.na(Embarked), Embarked:=factor("S")]
+
+########### Split test/train ########### 
+
+id_train <- sample.int(nrow(data), 0.8*nrow(data))
+data_train <- data[id_train,]
+data_test <- data[setdiff(1:nrow(data), id_train),]
+
+########### GLM Model ########### 
+
+glm.model <- glm(Survived ~ Pclass + Sex + Age + SibSp + Parch + Fare + Embarked, data=data_train, family = binomial(link='logit'))
+summary(glm.model)
+
+pred.glm <- predict(glm.model, data_test, type="response")
+pred.glm <- ifelse(pred.glm > 0.5,1,0)
+
+table(data.frame(data_test$Survived, pred.glm))
+
+misClasificError <- mean(pred.glm != data_test$Survived)
+print(paste('Accuracy',1-misClasificError))
+
+p <- predict(glm.model, newdata=data_test, type="response")
+pr <- prediction(p, data_test$Survived)
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+plot(prf)
+
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+
+
+########### GLM Model 2 ########### 
+
+glm.model2 <- glm(Survived ~ Pclass + Sex + Age + SibSp + Parch + Fare + Embarked + ShareTicket + Title, data=data_train, family = binomial(link='logit'))
+summary(glm.model2)
+
+pred.glm2 <- predict(glm.model2, data_test, type="response")
+pred.glm2 <- ifelse(pred.glm2 > 0.5,1,0)
+
+table(data.frame(data_test$Survived, pred.glm2))
+
+misClasificError <- mean(pred.glm2 != data_test$Survived)
+print(paste('Accuracy',1-misClasificError))
+
+p <- predict(glm.model2, newdata=data_test, type="response")
+pr <- prediction(p, data_test$Survived)
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+plot(prf)
+
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+
+
+########### GLM Model 3 ########### 
+
+glm.model3 <- glm(Survived ~ Pclass + Sex + Age + SibSp + Title, data=data_train, family = binomial(link='logit'))
+summary(glm.model3)
+
+pred.glm3 <- predict(glm.model3, data_test, type="response")
+pred.glm3 <- ifelse(pred.glm3 > 0.5, 1, 0)
+
+table(data.frame(data_test$Survived, pred.glm3))
+
+misClasificError <- mean(pred.glm3 != data_test$Survived)
+print(paste('Accuracy',1-misClasificError))
+
+p <- predict(glm.model3, newdata=data_test, type="response")
+pr <- prediction(p, data_test$Survived)
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+plot(prf)
+
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+
+
+########### GBM Model ########### 
+
+gbm.model <- gbm(Survived ~ Pclass + Sex + Age + SibSp + Title, data=data_train, n.trees = 700, shrinkage=0.01)
+summary(gbm.model)
+gbm_perf <- gbm.perf(gbm.model, method="OOB")
+
+pred.gbm <- predict(gbm.model, data_test, n.trees=700, type="response")
+pred.gbm <- ifelse(pred.gbm > 0.5, 1, 0)
+
+table(data.frame(data_test$Survived, pred.gbm))
+
+misClasificError <- mean(pred.gbm != data_test$Survived)
+print(paste('Accuracy',1-misClasificError))
+
+p <- pred.gbm
+pr <- prediction(p, data_test$Survived)
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+plot(prf)
+
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+
+
+########### Tree ########### 
+
+forest.model <- cforest(Survived ~ Pclass + Sex + Age + SibSp + Parch + Fare + Embarked + ShareTicket + Title,
+                        data = data_train, controls=cforest_unbiased(ntree=2500, mtry=4))
+
+pred.forest <- predict(forest.model, data_test, OOB=TRUE, type = "response")
+pred.forest <- ifelse(pred.forest > 0.5, 1, 0)
+
+table(data.frame(data_test$Survived, pred.forest))
+
+misClasificError <- mean(pred.forest != data_test$Survived)
+print(paste('Accuracy',1-misClasificError))
+
+p <- pred.forest
+pr <- prediction(p, data_test$Survived)
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+plot(prf)
+
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+
+
+########### Tree ########### 
+
+mob.model <- mob(Survived ~ Fare|Pclass+Sex+Age+Embarked+ShareTicket+Title,
+                 data = data_train, control = mob_control(minsplit = 50))
+
+pred.mob <- predict(mob.model, data_test, OOB=TRUE, type = "response")
+pred.mob <- ifelse(pred.mob > 0.5, 1, 0)
+
+table(data.frame(data_test$Survived, pred.mob))
+
+misClasificError <- mean(pred.mob != data_test$Survived)
+print(paste('Accuracy',1-misClasificError))
+
+p <- pred.mob
+pr <- prediction(p, data_test$Survived)
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+plot(prf)
+
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+
+######### Test #################
+gbm.model <- gbm(Survived ~ Pclass + Sex + Age + SibSp + Title, data=data, n.trees = 500, shrinkage=0.01)
+glm.model2 <- glm(Survived ~ Pclass + Sex + Age + SibSp + Parch + Fare + Embarked + ShareTicket + Title, data=data, family = binomial(link='logit'))
+glm.model3 <- glm(Survived ~ Pclass + Sex + Age + SibSp + Title, data=data, family = binomial(link='logit'))
+forest.model <- cforest(Survived ~ Pclass + Sex + Age + SibSp + Parch + Fare + Embarked + ShareTicket + Title,
+                        data = data, controls=cforest_unbiased(ntree=2500, mtry=4))
+
+finaltest = read.csv("C://Users/r-chiche/Desktop/Titanic/test2.csv", stringsAsFactors = T, sep=";", dec=".", na.strings=c(""))
+
+finaltest = as.data.table(finaltest)
+finaltest[, ShareTicket:=length(Title), by=Ticket]
+
+finaltest[, Title:=as.factor(ifelse(Title %in% c("Capt", "Col", "Major", "Rev", "Dr"), "Gvt",
+                                    ifelse(Title %in% c("Don", "Master", "Sir", "the Countess", "Lady", "Jonkheer"), "Noble",
+                                           "None")))]
+
+# # Class should be a factor and not a numeric field
+finaltest[, Pclass:=as.factor(Pclass)]
+
+
+# Try to fill in missing Ages
+
+# Regression tree
+age_model <- mob(Age~SibSp+Fare+Parch|Pclass+Sex+Embarked, data=finaltest)
+newage <- predict(age_model, finaltest[, !c("Survived", "Name"), with=F], type="response")
+
+plot(finaltest$Age[!is.na(finaltest$Age)], newage[!is.na(finaltest$Age)])
+abline(0,1, col="red")
+
+finaltest[is.na(Age), Age:=newage[is.na(finaltest$Age)]]
+
+
+# Try to fill in missing Embarked with most common value (S)
+table(finaltest$Embarked)
+finaltest[is.na(Embarked), Embarked:=factor("S")]
+
+pred.test <- predict(forest.model, finaltest, OOB=T, type="response")
+pred.test <- ifelse(pred.test > 0.5, 1, 0)
+pred.test[is.na(pred.test)] <- 0
+
+submission <- data.frame(PassengerId=finaltest$PassengerId, Survived=pred.test)
+
+write.table(submission, "C://Users/r-chiche/Desktop/Titanic/submission random forest.csv", sep=",", row.names=F)
